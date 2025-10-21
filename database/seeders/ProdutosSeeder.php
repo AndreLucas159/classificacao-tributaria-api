@@ -19,7 +19,7 @@ class ProdutosSeeder extends Seeder
     public function run(): void
     {
         // Desativa a verificação de chaves estrangeiras de forma compatível com múltiplos bancos.
-        Schema::disableForeignKeyConstraints();
+        // Schema::disableForeignKeyConstraints();
 
         // Limpa as tabelas para evitar duplicidade de dados em reexecuções.
         RegraTributaria::truncate();
@@ -359,6 +359,6 @@ class ProdutosSeeder extends Seeder
         }
 
         // Reativa a verificação de chaves estrangeiras.
-        Schema::enableForeignKeyConstraints();
+        // Schema::enableForeignKeyConstraints();
     }
 }
