@@ -10,4 +10,5 @@ Route::middleware('auth:sanctum')->get('/user', function (Request $request) {
 
 Route::post('/analisar-produto', [ClassificacaoTributariaController::class, 'analisar'])->name('api.produto.analisar');
 Route::get('/testar-apis', [ClassificacaoTributariaController::class, 'testarApis'])->name('api.testar');
+Route::get('/teste-curl-direto', [ClassificacaoTributariaController::class, 'testeGeminiComCurl'])->name('api.teste.curl');
 

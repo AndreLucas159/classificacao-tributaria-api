@@ -3,12 +3,10 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
-use App\Models\Produto;
 use Illuminate\Http\Request;
-use Gemini\Laravel\Facades\Gemini;
-use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Validator;
 
 class ClassificacaoTributariaController extends Controller
 {
@@ -21,7 +19,7 @@ class ClassificacaoTributariaController extends Controller
     }
 
     /**
-     * Analisa os dados de um produto, valida inconsistências e retorna a classificação fiscal.
+     * Analisa os dados de um produto
      */
     public function analisar(Request $request)
     {
@@ -37,24 +35,31 @@ class ClassificacaoTributariaController extends Controller
         }
 
         $data = $validator->validated();
-
         $prompt = $this->buildPrompt($data);
 
-        // Tenta primeiro com Gemini
-        $result = $this->tryGemini($prompt);
+        Log::info('Solicitação de análise tributária', ['data' => $data]);
 
-        // Se Gemini falhar, tenta com DeepSeek
+        // Tenta primeiro com DeepSeek
+        $result = $this->tryDeepSeek($prompt);
+
+        // Se DeepSeek falhar, tenta com Gemini via HTTP direto
         if (!$result['success']) {
-            Log::warning('Gemini falhou, tentando DeepSeek', ['error' => $result['error']]);
-            $result = $this->tryDeepSeek($prompt);
+            Log::warning('DeepSeek falhou, tentando Gemini', ['error' => $result['error']]);
+            $result = $this->tryGeminiDirect($prompt);
         }
 
         if ($result['success']) {
-            return response()->json($result['data']);
+            return response()->json([
+                'success' => true,
+                'data' => $result['data'],
+                'source' => $result['source']
+            ]);
         }
 
         return response()->json([
-            'error' => 'Ambas as APIs falharam: ' . $result['error'],
+            'success' => false,
+            'error' => 'Não foi possível processar a solicitação no momento',
+            'details' => $result['error'],
             'fallback_suggestion' => $this->getFallbackSuggestion($data)
         ], 500);
     }
@@ -65,79 +70,98 @@ class ClassificacaoTributariaController extends Controller
     private function buildPrompt(array $data): string
     {
         return "
-            Aja como um especialista em tributação e classificação fiscal de mercadorias (merceologia) no Brasil.
-            Sua principal fonte de conhecimento deve ser a legislação brasileira, especialmente documentos como a INSTRUCAO NORMATIVA DIAT N{\" } 1, DE 29 DE MARCO DE 2023, e a tabela TIPI.
+            Você é um especialista em tributação brasileira e classificação fiscal de mercadorias.
 
-            A tarefa é analisar os dados de um produto fornecido e realizar duas funcoes principais:
-            1.  **Analise de Consistencia:** Verifique se os campos 'CEST', 'NCM/SH' e 'Descricao' sao consistentes entre si. Por exemplo, o NCM/SH corresponde a descricao do produto? O CEST e aplicavel a esse NCM/SH?
-            2.  **Classificacao Correta:** Com base na descricao, que e o campo principal, forneca a classificacao tributaria federal correta e completa.
+            ANALISE OS SEGUINTES DADOS:
 
-            Dados Fornecidos para Analise:
-            - Item: {$data['item']}
-            - CEST: {$data['cest']}
-            - NCM/SH: {$data['ncm_sh']}
-            - Descricao: {$data['descricao']}
+            Descrição: {$data['descricao']}
+            NCM/SH: {$data['ncm_sh']}
+            CEST: {$data['cest']}
+            Item: {$data['item']}
 
-            O JSON de resposta DEVE ter a seguinte estrutura, sem excecoes:
+            SUAS TAREFAS:
+            1. Verificar se NCM, CEST e Descrição são consistentes entre si
+            2. Sugerir a classificação tributária correta se houver inconsistências
+            3. Fornecer os tributos federais aplicáveis
+
+            RETORNE APENAS JSON COM ESTA ESTRUTURA:
+
             {
                 \"analise_consistencia\": {
-                    \"consistente\": boolean,
-                    \"observacoes\": \"string\"
+                    \"consistente\": true,
+                    \"observacoes\": \"Análise de consistência entre os campos\"
                 },
                 \"classificacao_sugerida\": {
-                    \"descricao\": \"string\",
-                    \"ncm_sh\": \"string\",
-                    \"cest\": \"string\",
-                    \"icms\": {
-                        \"cst\": \"string\",
-                        \"aliquota\": number
-                    },
-                    \"ipi\": {
-                        \"cst\": \"string\",
-                        \"aliquota\": number
-                    },
-                    \"pis\": {
-                        \"cst\": \"string\",
-                        \"aliquota\": number
-                    },
-                    \"cofins\": {
-                        \"cst\": \"string\",
-                        \"aliquota\": number
-                    },
-                    \"base_legal\": \"string\"
+                    \"descricao\": \"Descrição corrigida se necessário\",
+                    \"ncm_sh\": \"Código NCM correto de 8 dígitos\",
+                    \"cest\": \"Código CEST correto\",
+                    \"icms\": {\"cst\": \"00\", \"aliquota\": 12},
+                    \"ipi\": {\"cst\": \"50\", \"aliquota\": 0},
+                    \"pis\": {\"cst\": \"01\", \"aliquota\": 1.65},
+                    \"cofins\": {\"cst\": \"01\", \"aliquota\": 7.6},
+                    \"base_legal\": \"Fundamentação legal baseada na legislação tributária brasileira\"
                 }
             }
 
-            Exemplo de observacao para um caso inconsistente: 'O NCM/SH 8703.23.10 refere-se a automoveis, mas a descricao e 'parafusos'. O NCM/SH correto para parafusos de aco e 7318.15.00.'
-            Se os dados forem consistentes, a observacao pode ser: 'Os dados fornecidos sao consistentes entre si.'
-            Se um imposto nao se aplicar, a aliquota deve ser 0.
-            Retorne SOMENTE o JSON.
+            IMPORTANTE: Retorne SOMENTE o JSON, sem texto adicional.
         ";
     }
 
     /**
-     * Tenta usar a API Gemini
+     * Gemini via HTTP direto (mais confiável)
      */
-    private function tryGemini(string $prompt): array
+    private function tryGeminiDirect(string $prompt): array
     {
         try {
-            $result = Gemini::geminiPro()->generateContent($prompt);
-            $jsonResponse = $this->extractJson($result->text());
+            $apiKey = env('GEMINI_API_KEY');
 
-            if ($jsonResponse === null) {
-                return [
-                    'success' => false,
-                    'error' => 'Não foi possível extrair JSON da resposta do Gemini'
-                ];
+            $response = Http::timeout(30)
+                ->withHeaders([
+                    'Content-Type' => 'application/json',
+                ])
+                ->post("https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={$apiKey}", [
+                    'contents' => [
+                        [
+                            'parts' => [
+                                ['text' => $prompt]
+                            ]
+                        ]
+                    ],
+                    'generationConfig' => [
+                        'temperature' => 0.1,
+                        'maxOutputTokens' => 2000,
+                    ]
+                ]);
+
+            Log::info('Resposta Gemini HTTP', [
+                'status' => $response->status(),
+                'body' => $response->body()
+            ]);
+
+            if ($response->successful()) {
+                $data = $response->json();
+
+                if (isset($data['candidates'][0]['content']['parts'][0]['text'])) {
+                    $content = $data['candidates'][0]['content']['parts'][0]['text'];
+                    $jsonResponse = $this->extractJson($content);
+
+                    if ($jsonResponse !== null) {
+                        return [
+                            'success' => true,
+                            'data' => json_decode($jsonResponse, true),
+                            'source' => 'gemini'
+                        ];
+                    }
+                }
             }
 
             return [
-                'success' => true,
-                'data' => json_decode($jsonResponse, true),
-                'source' => 'gemini'
+                'success' => false,
+                'error' => 'Gemini: ' . $response->status() . ' - ' . substr($response->body(), 0, 100)
             ];
 
         } catch (\Exception $e) {
+            Log::error('Erro Gemini Direct', ['error' => $e->getMessage()]);
             return [
                 'success' => false,
                 'error' => 'Gemini: ' . $e->getMessage()
@@ -146,7 +170,7 @@ class ClassificacaoTributariaController extends Controller
     }
 
     /**
-     * Tenta usar a API DeepSeek como fallback
+     * DeepSeek API
      */
     private function tryDeepSeek(string $prompt): array
     {
@@ -155,6 +179,7 @@ class ClassificacaoTributariaController extends Controller
                 ->withHeaders([
                     'Authorization' => 'Bearer ' . $this->deepSeekApiKey,
                     'Content-Type' => 'application/json',
+                    'Accept' => 'application/json',
                 ])
                 ->post($this->deepSeekBaseUrl . '/chat/completions', [
                     'model' => 'deepseek-chat',
@@ -168,6 +193,11 @@ class ClassificacaoTributariaController extends Controller
                     'max_tokens' => 2000,
                     'stream' => false
                 ]);
+
+            Log::info('Resposta DeepSeek', [
+                'status' => $response->status(),
+                'body' => $response->body()
+            ]);
 
             if ($response->successful()) {
                 $data = $response->json();
@@ -184,19 +214,16 @@ class ClassificacaoTributariaController extends Controller
                         ];
                     }
                 }
-
-                return [
-                    'success' => false,
-                    'error' => 'DeepSeek: Resposta em formato inválido'
-                ];
             }
 
+            $errorBody = $response->body();
             return [
                 'success' => false,
-                'error' => 'DeepSeek: ' . $response->status() . ' - ' . $response->body()
+                'error' => 'DeepSeek: ' . $response->status() . ' - ' . (strlen($errorBody) > 100 ? substr($errorBody, 0, 100) . '...' : $errorBody)
             ];
 
         } catch (\Exception $e) {
+            Log::error('Erro DeepSeek', ['error' => $e->getMessage()]);
             return [
                 'success' => false,
                 'error' => 'DeepSeek: ' . $e->getMessage()
@@ -205,36 +232,46 @@ class ClassificacaoTributariaController extends Controller
     }
 
     /**
-     * Extrai JSON do texto de resposta
+     * Extrai JSON do texto
      */
     private function extractJson(string $text): ?string
     {
-        // Tenta extrair de código markdown
-        if (preg_match('/```json\s*(\{.*?\})\s*```/s', $text, $matches)) {
-            return $matches[1];
-        }
+        $text = trim($text);
 
-        // Tenta extrair JSON simples
-        if (preg_match('/\{(?:[^{}]|(?R))*\}/s', $text, $matches)) {
-            return $matches[0];
+        // Remove markdown code blocks
+        $text = preg_replace('/```json\s*/', '', $text);
+        $text = preg_replace('/```\s*/', '', $text);
+
+        // Tenta encontrar JSON
+        $jsonStart = strpos($text, '{');
+        $jsonEnd = strrpos($text, '}');
+
+        if ($jsonStart !== false && $jsonEnd !== false && $jsonEnd > $jsonStart) {
+            $jsonString = substr($text, $jsonStart, $jsonEnd - $jsonStart + 1);
+
+            // Valida se é JSON válido
+            json_decode($jsonString);
+            if (json_last_error() === JSON_ERROR_NONE) {
+                return $jsonString;
+            }
         }
 
         return null;
     }
 
     /**
-     * Fornece uma sugestão de fallback quando ambas APIs falham
+     * Sugestão de fallback
      */
     private function getFallbackSuggestion(array $data): array
     {
         return [
-            'sugestao_manual' => 'Recomendação temporária:',
-            'acoes' => [
-                'Verifique a descrição do produto na Tabela TIPI',
-                'Consulte o site da Receita Federal para NCM',
-                'Verifique a consistência entre CEST e NCM manualmente'
+            'sugestao_manual' => 'Classificação manual necessária',
+            'acoes_recomendadas' => [
+                'Consultar a Tabela TIPI para NCM correto',
+                'Verificar compatibilidade entre CEST e NCM',
+                'Validar descrição do produto conforme legislação'
             ],
-            'links_uteis' => [
+            'recursos' => [
                 'Tabela TIPI' => 'http://www.planalto.gov.br/ccivil_03/_ato2007-2010/2009/decreto/d6950.htm',
                 'Consulta NCM' => 'http://www4.receita.fazenda.gov.br/simulador/PesquisarNCM.jsp',
                 'Tabela CEST' => 'https://www.confaz.fazenda.gov.br/legislacao/ajustes/2015/ac007_15'
@@ -243,17 +280,75 @@ class ClassificacaoTributariaController extends Controller
     }
 
     /**
-     * Método para testar as conexões com as APIs
+     * Teste das APIs
      */
     public function testarApis()
     {
-        $testPrompt = "Responda apenas com: {\"status\": \"ok\", \"api\": \"teste\"}";
+        $testPrompt = "Responda APENAS com este JSON: {\"status\": \"ok\", \"mensagem\": \"API funcionando\"}";
 
         $results = [
-            'gemini' => $this->tryGemini($testPrompt),
-            'deepseek' => $this->tryDeepSeek($testPrompt)
+            'deepseek' => $this->tryDeepSeek($testPrompt),
+            'gemini' => $this->tryGeminiDirect($testPrompt),
+            'ambiente' => [
+                'deepseek_key' => $this->deepSeekApiKey ? '***' . substr($this->deepSeekApiKey, -4) : 'Não configurada',
+                'gemini_key' => env('GEMINI_API_KEY') ? '***' . substr(env('GEMINI_API_KEY'), -4) : 'Não configurada',
+            ]
         ];
 
         return response()->json($results);
+    }
+
+    /**
+     * Teste simples com dados de exemplo
+     */
+    public function testeSimples()
+    {
+        $exemploData = [
+            'descricao' => 'Parafuso de aço para construção civil',
+            'ncm_sh' => '7318.15.00',
+            'cest' => '28.038.00',
+            'item' => '001'
+        ];
+
+        $request = new Request($exemploData);
+        return $this->analisar($request);
+    }
+
+    /**
+     * Teste de diagnóstico com cURL direto via shell
+     */
+    public function testeGeminiComCurl()
+    {
+        $apiKey = env('GEMINI_API_KEY');
+        if (!$apiKey) {
+            return response()->json(['error' => 'GEMINI_API_KEY não está configurada no .env'], 500);
+        }
+
+        $url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={$apiKey}";
+        $data = json_encode([
+            'contents' => [
+                [
+                    'parts' => [
+                        ['text' => 'Responda apenas com a palavra "OK"']
+                    ]
+                ]
+            ]
+        ]);
+
+        // Escapa as aspas para o shell
+        $escapedData = escapeshellarg($data);
+
+        // Constrói o comando cURL
+        $command = "curl -X POST -H \"Content-Type: application/json\" -d {$escapedData} \"{$url}\"";
+
+        // Executa o comando
+        $result = shell_exec($command);
+
+        // Retorna o resultado bruto
+        return response()->json([
+            'command' => $command,
+            'result_raw' => $result,
+            'result_decoded' => json_decode($result, true)
+        ]);
     }
 }
